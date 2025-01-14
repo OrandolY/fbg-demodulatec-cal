@@ -1,3 +1,4 @@
+import os
 import numpy as np  
 import pandas as pd  
 import time
@@ -6,26 +7,17 @@ from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit  
 from scipy.signal import find_peaks 
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Process, Queue, Value, Event
+from queue import Empty  # 导入 queue.Empty
 
-
-# read data from csv file
-def read_data_from_csv(file_path):
-    try:
-        df = pd.read_csv(file_path, header=None)  
-        data = df.values  # 或者使用 df.to_numpy() 
-        if(len(data) < 200):
-            print("Warning: data length less 200. please check the data.")
-    
-        return data
-
-    except Exception as e:  
-        print(f"Error reading the CSV file: {e}")  
-        return None
 # cut the multiple peaks to single, then analysethem
 def cut_the_peaks(data):
     try:
-        Intensity = data[:,1]
-        Wavelength = data[:,0]
+        sorted_data = data[np.argsort(data[:, 0])]
+        # save_file = 'recv_sort.csv'
+        # pd.DataFrame(sorted_data).to_csv(save_file, header=None, index=False)
+        Intensity = sorted_data[:,1]
+        Wavelength = sorted_data[:,0]
         # 分割
         peaks, _ = find_peaks(Intensity, height = np.max(Intensity)/3, distance = 50)
         cut_line_end = [0, len(Intensity) - 1]
@@ -40,7 +32,7 @@ def cut_the_peaks(data):
         return len(peaks), find_fbgs_result.flatten()
 
     except Exception as e:  
-        print(f"Error cut the data: {e}")  
+        print(f"Error cut the data: {e}")
         return None
 
 # 找到峰值  
@@ -92,10 +84,11 @@ def process_guass_fit(x_data, y_data):
     return peak_value, peak_coordinate  
 
 # 建立UDP连接  
-def Udp_open():  
+def Udp_open(queue, stop_event):
     try:  
         # 获取本地IP端口  
         local_ip = '192.168.0.4'  
+        # local_ip = '180.209.3.214'
         local_port = 2599  
 
         # 输入有效性检查  
@@ -116,8 +109,8 @@ def Udp_open():
         clear_udp_buffer(sock)  
         
         # 持续读取数据  
-        while True:  
-            Udp_read_period(sock)  
+        while not stop_event.is_set():  # 检查停止事件:  
+            Udp_read_period(sock, queue, stop_event)  
 
     except socket.error as e:  
         print(f"Invalid address: {e}")  
@@ -133,7 +126,7 @@ def clear_udp_buffer(sock):
         # 循环读取，直到没有更多的待处理数据  
         while True:  
             # 设置时间限制，避免无限循环  
-            sock.settimeout(0.1)  # 设置超时为100毫秒  
+            sock.settimeout(1)  # 设置超时为1000毫秒  
             try:  
                 data, addr = sock.recvfrom(2048)  # 尝试接收数据  
                 print(f"Clearing buffer: Received data from {addr}")  
@@ -142,38 +135,57 @@ def clear_udp_buffer(sock):
     except Exception as e:  
         print(f"Error clearing buffer: {e}")  
 
-def Udp_read_period(sock):  
-    storage_array = []  # 将数组初始化在函数内，避免多次调用时出现问题  
+def recv_checked_data(sock, check_header, static_len, stop_event):
+    data = []
+    while(not stop_event.is_set() and (len(data) == 0 or data[0:4] != bytes.fromhex(check_header))):
+        data, addr = sock.recvfrom(static_len)  # 设置接收的最大字节数
+        while (not stop_event.is_set() and len(data) < static_len):
+            part, addr = sock.recvfrom(static_len - len(data))  # 接收剩余的数据
+            data += part  # 拼接数据
+    if stop_event.is_set():
+        return None
+    return data[4:]
 
+def Udp_read_period(sock, queue, stop_event):  
+    # storage_array = []  # 将数组初始化在函数内，避免多次调用时出现问题  
     try:  
-        internal_data = []
+        static_len = 1204
+        start_time = time.time()
+        points = np.zeros(shape=(1800, 2))
         # 设置接收数据缓冲区大小  
-        data, addr = sock.recvfrom(1208)  # 设置接收的最大字节数
-        internal_data[0:1200] = data[8:]  # 提取UDP负载
-        data, addr = sock.recvfrom(1208)  # 设置接收的最大字节数
-        internal_data[1200:2400] = data[8:]
-        data, addr = sock.recvfrom(1208)  # 设置接收的最大字节数
-        internal_data[240:3600] = data[8:]
-        data, addr = sock.recvfrom(1208)  # 设置接收的最大字节数
-        internal_data[3600:4800] = data[8:]
-        data, addr = sock.recvfrom(1208)  # 设置接收的最大字节数
-        internal_data[4800:6000] = data[8:]
-        data, addr = sock.recvfrom(1060)  # 设置接收的最大字节数
-        internal_data[6000:7060] = data[8:]
-        # print(f"Received {len(data)} bytes of data from {addr}: {data}")  
+        data = recv_checked_data(sock, "01010101", static_len, stop_event)
+        if stop_event.is_set():
+            return None
+        points[0:300, :] = process_udp_data(data)  # 调用数据处理函数 
 
-        # 检查接收到的数据长度 
-        if len(data) >= 8:  
-            # 处理接收到的数据
-            points = process_udp_data(internal_data)  # 调用数据处理函数  
-            storage_array.append(points)  # 存储处理结果  
+        data = recv_checked_data(sock, "02020202", static_len, stop_event)
+        if stop_event.is_set():
+            return None
+        points[300:600, :] = process_udp_data(data)  # 调用数据处理函数  
 
-            # 打印处理结果  
-            print(f"Processed points: {points}")  
-            return points  
-        else:  
-            print("Received data is smaller than 8 bytes, unable to extract internal data.")  
-            return None  
+        data = recv_checked_data(sock, "03030303", static_len, stop_event)
+        if stop_event.is_set():
+            return None
+        points[600:900, :] = process_udp_data(data)  # 调用数据处理函数  
+        
+        data = recv_checked_data(sock, "04040404", static_len, stop_event)
+        if stop_event.is_set():
+            return None
+        points[900:1200, :] = process_udp_data(data)  # 调用数据处理函数  
+        
+        data = recv_checked_data(sock, "05050505", static_len, stop_event)
+        if stop_event.is_set():
+            return None
+        points[1200:1500, :] = process_udp_data(data)  # 调用数据处理函数 
+        
+        data = recv_checked_data(sock, "06060606", static_len, stop_event)
+        if stop_event.is_set():
+            return None
+        points[1500:1800, :] = process_udp_data(data)  # 调用数据处理函数 
+        
+        queue.put(points)  # 将完整数据放入队列
+
+        return None  
 
     except Exception as e:  
         print(f"Error reading datagram: {e}")  
@@ -186,6 +198,10 @@ def process_udp_data(data):
         print(len(data))
         raise ValueError("Data length must be a multiple of 4")  
 
+    if len(data) !=  1200:
+        print(len(data))
+        raise ValueError("Data length must be 1200")
+
     points = []  
     # 每4个字节提取一次  
     for i in range(0, len(data), 4):  
@@ -196,33 +212,83 @@ def process_udp_data(data):
         y = (group[3] << 8) + group[2]  # 后两个字节作为y坐标  
         points.append((x, y))  
 
-    return points  
+    return np.array(points)  
+
+def Udp_data_pro(queue, counter, stop_event, Threshold_num):
+    print(f"processer stated!:{os.getpid()}")
+    while not stop_event.is_set():
+        process_recv_data(queue, counter, stop_event, Threshold_num)
+    print(f"processer ended!:{os.getpid()}")
+
+def process_recv_data(queue, counter, stop_event, Threshold_num):
+    while queue.empty():
+        if counter.value >= Threshold_num:
+            stop_event.set()  # 设置停止事件
+            print(counter.value)
+            return None
+        time.sleep(0.01)
+
+    try:  
+        data = queue.get(timeout=0.01)  # 从队列中获取数据  # 0.01秒超时  
+    except Empty:
+        return None
+    # print(counter.value)
+    # fbgs_results = np.zeros(shape=(3, 10))
+    result = cut_the_peaks(np.array(data))
+    if result is not None:  
+        # peaks_nums, fbgs_results[:, 0] = result
+        peaks_nums, _ = result
+        # print(result)
+        # print(fbgs_results[:, 0]) #########################################################################
+    else:  
+        print("Error occurred while cutting peaks.")  
+        return None  # 或者处理错误的逻辑
+    if (peaks_nums < 3):
+        print(f"\n peaks_nums = {peaks_nums}")
+    with counter.get_lock():  # 确保对值的原子更新  
+        counter.value += 1  # 自增计数器
+    if counter.value >= Threshold_num:
+        stop_event.set()  # 设置停止事件
+    
+    # save_file = 'res_test_tran.csv'
+    # pd.DataFrame(fbgs_results).to_csv(save_file, header=None, index=False)
+
+    return None
 
 def main():
     
-    Udp_open()
+    Threshold_num = 100000
+
+    queue = Queue()  # 创建共享队列  
+    counter = Value('i', 0)  # 创建共享整数（初始值为0）  
+    stop_event = Event()  # 创建停止事件
+ 
+    # 启动接收进程  
+    receiver_process = Process(target=Udp_open, args=(queue, stop_event))  
+    receiver_process.start()  
+
+    # 启动多个处理进程  
+    num_processors = 3  # 根据需要调整处理进程数量  
+    processor_processes = []  
+    for _ in range(num_processors):  
+        processor = Process(target=Udp_data_pro, args=(queue, counter, stop_event, Threshold_num))  
+        processor.start()  
+        processor_processes.append(processor)  
     
-    # 记录开始时间  
     start_time = time.time()  
 
-    fbgs_results = np.zeros(shape=(3, 10))
-    heltz = 40
+    # 等待进程结束  
+    receiver_process.join()  
+    print("receiver_process joined!")
+     # 设置停止事件，等待处理进程结束  
+    # stop_event.set()  # 发送停止信号给处理进程
+    for processor in processor_processes: 
+        processor.join()
+    print("processor_process joined!")
+    end_time = time.time() 
 
-    for index in range(10):
-        file_name = str(heltz) + 'HZ_' + str(index+1) + '_raw.csv'
-        peaks_nums,fbgs_results[:, index]  = cut_the_peaks(read_data_from_csv('fbg_data.csv')) 
-        if (peaks_nums < 3):
-            print(f"\n peaks_nums = {peaks_nums}")
+    print(f"Total time for {Threshold_num} fittings: {end_time - start_time:.4f} seconds")
 
-    # print(fbgs_results)
-    save_file = str(heltz) + 'HZ_' + 'fbgs_results.csv'
-    pd.DataFrame(fbgs_results).to_csv(save_file, header=None, index=False)
-
-    # 记录结束时间  
-    end_time = time.time()  
-    total_time = end_time - start_time  # 计算总耗时   
-    # 打印总耗时  
-    print(f"Total time for {10} fittings: {total_time:.4f} seconds")
 
 if __name__ == "__main__":  
     main()
