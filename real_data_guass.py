@@ -1,3 +1,7 @@
+# Auther : Orandol
+# update time : 2025.1.27
+# version 25.1
+
 import os
 import numpy as np  
 import pandas as pd  
@@ -87,15 +91,15 @@ def process_guass_fit(x_data, y_data):
 def Udp_open(queue, stop_event):
     try:  
         # 获取本地IP端口  
-        local_ip = '192.168.0.4'  
-        # local_ip = '180.209.3.214'
+        # local_ip = '192.168.0.4'  
+        local_ip = '180.209.3.214'
         local_port = 2599  
 
         # 输入有效性检查  
         # 检查IP地址格式  
         socket.inet_aton(local_ip)  # 对于IPv4地址  
         # 检查端口号  
-        if local_port < 1 or local_port > 65535:  
+        if local_port < 1 or local_port > 65535:
             raise ValueError("Port number must be between 1 and 65535.")  
 
         # 实例化UDP套接字  
@@ -229,7 +233,7 @@ def process_recv_data(queue, counter, stop_event, Threshold_num):
         time.sleep(0.01)
 
     try:  
-        data = queue.get(timeout=0.01)  # 从队列中获取数据  # 0.01秒超时  
+        data = queue.get(timeout=0.01)  # 从队列中获取数据  # 0.01秒超时
     except Empty:
         return None
     # print(counter.value)
@@ -257,7 +261,7 @@ def process_recv_data(queue, counter, stop_event, Threshold_num):
 
 def main():
     
-    Threshold_num = 100000
+    Threshold_num = 1000
 
     queue = Queue()  # 创建共享队列  
     counter = Value('i', 0)  # 创建共享整数（初始值为0）  
